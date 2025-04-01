@@ -1,3 +1,0 @@
-[console_scripts]
-navigator = final_nav.frontier_nav:main
-
