@@ -9,6 +9,7 @@ from nav2_msgs.srv import GetCostmap
 from nav2_msgs.msg import Costmap
 from nav_msgs.msg  import OccupancyGrid
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 import rclpy
 from rclpy.action import ActionClient
@@ -116,6 +117,7 @@ def findFree(mx, my, costmap):
     return (mx, my)
 
 def getFrontier(pose, costmap, logger):
+    print("Getting frontiers")
     fCache = FrontierCache()
 
     fCache.clear()
@@ -246,8 +248,9 @@ class FrontierNav(Node):
         self.pitch = 0
         self.yaw = 0
 
-        self.costmapSub = self.create_subscription(OccupancyGrid(), 'map', self.occupancyGridCallback, qos_profile_sensor_data)
+        self.costmapSub = self.create_subscription(OccupancyGrid, 'map', self.occupancyGridCallback, qos_profile_sensor_data)
         self.costmap = None
+        
         self.get_logger().info('Starting Navigation')
 
     def occupancyGridCallback(self, msg):
