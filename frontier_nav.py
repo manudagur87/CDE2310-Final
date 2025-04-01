@@ -2,19 +2,21 @@ import sys
 import time
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav2_msgs.action import FollowWaypoints
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav2_msgs.srv import GetCostmap
 from nav2_msgs.msg import Costmap
 from nav_msgs.msg  import OccupancyGrid
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
 from rclpy.qos import QoSProfile
+from rclpy.qos import qos_profile_sensor_data
 
 from enum import Enum
 
@@ -22,8 +24,8 @@ import numpy as np
 
 import math
 
-OCC_THRESHOLD = 10
-MIN_FRONTIER_LIST = 5
+OCC_THRESHOLD = 0
+MIN_FRONTIER_LIST = 1
 
 class OccupancyGrid2d():
     class CostValues(Enum):
@@ -52,6 +54,8 @@ class OccupancyGrid2d():
 
     def worldToMap(self, wx, wy):
         if (wx < self.map.info.origin.position.x or wy < self.map.info.origin.position.y):
+            print(f'wx: {wx}')
+            print(f'origin: {self.map.info.origin.position.x}')
             raise Exception("World coordinates out of bounds")
 
         mx = int((wx - self.map.info.origin.position.x) / self.map.info.resolution)
@@ -61,7 +65,7 @@ class OccupancyGrid2d():
             raise Exception("Out of bounds")
 
         return (mx, my)
-
+    
     def __getIndex(self, mx, my):
         return my * self.map.info.width + mx
     
@@ -115,6 +119,7 @@ def findFree(mx, my, costmap):
     return (mx, my)
 
 def getFrontier(pose, costmap, logger):
+    print("Getting frontiers")
     fCache = FrontierCache()
 
     fCache.clear()
@@ -128,12 +133,13 @@ def getFrontier(pose, costmap, logger):
 
     frontiers = []
 
+    print(f"map point: {len(mapPointQueue)}")
     while len(mapPointQueue) > 0:
         p = mapPointQueue.pop(0)
 
         if p.classification & PointClassification.MapClosed.value != 0:
             continue
-
+        
         if isFrontierPoint(p, costmap, fCache):
             p.classification = p.classification | PointClassification.FrontierOpen.value
             frontierQueue = [p]
@@ -161,6 +167,7 @@ def getFrontier(pose, costmap, logger):
                 x.classification = x.classification | PointClassification.MapClosed.value
                 newFrontierCords.append(costmap.mapToWorld(x.mapX, x.mapY))
 
+            print(f"newFrontier: {len(newFrontier)}")
             if len(newFrontier) > MIN_FRONTIER_LIST:
                 frontiers.append(centroid(newFrontierCords))
 
@@ -206,31 +213,141 @@ class PointClassification(Enum):
     FrontierOpen = 4
     FrontierClosed = 8
 
+def euler_from_quaternion(x, y, z, w):
+    """
+    Convert a quaternion into euler angles (roll, pitch, yaw)
+    roll is rotation around x in radians (counterclockwise)
+    pitch is rotation around y in radians (counterclockwise)
+    yaw is rotation around z in radians (counterclockwise)
+    """
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll_x = math.atan2(t0, t1)
+
+    t2 = +2.0 * (w * y - z * x)
+    t2 = +1.0 if t2 > +1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch_y = math.asin(t2)
+
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw_z = math.atan2(t3, t4)
+
+    return roll_x, pitch_y, yaw_z # in radians
+
 class FrontierNav(Node):
     def __init__(self):
         super().__init__('frontier_nav')
         self.currentPose = None
+        self.publisher_ = self.create_publisher(Twist,'cmd_vel',10)
 
         pose_qos = QoSProfile(
-          durability=QoSDurabilityPolicy.RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL,
-          reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_RELIABLE,
-          history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
+          durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+          reliability=QoSReliabilityPolicy.RELIABLE,
+          history=QoSHistoryPolicy.KEEP_LAST,
           depth=1)
         
-        self.model_pose_sub = self.create_subscription(Odometry, '/odom', self.poseCallback, pose_qos)
-        self.costmapSub = self.create_subscription(OccupancyGrid(), '/map', self.occupancyGridCallback, pose_qos)
+        self.model_pose_sub = self.create_subscription(Odometry, 'odom', self.poseCallback, 10)
+        self.roll = 0
+        self.pitch = 0
+        self.yaw = 0
+
+        self.costmapSub = self.create_subscription(OccupancyGrid, 'map', self.occupancyGridCallback, qos_profile_sensor_data)
         self.costmap = None
+        
         self.get_logger().info('Starting Navigation')
 
     def occupancyGridCallback(self, msg):
         self.costmap = OccupancyGrid2d(msg)
 
+    def rotateBot(self, angle):
+        twist = Twist()
+        curr_yaw = self.yaw
+        c_yaw = complex(math.cos(curr_yaw), math.sin(curr_yaw))
+        new_yaw = curr_yaw + angle
+        c_new_yaw = complex(math.cos(new_yaw), math.sin(new_yaw))
+
+        c_change = c_new_yaw / c_yaw
+        dir = 1 if c_change.imag > 0 else -1
+
+        twist.linear.x = 0.0
+        twist.angular.z = 0.5 * dir
+        self.publisher_.publish(twist)
+
+        og_dir = dir
+        while(og_dir*dir>0):
+            rclpy.spin_once(self)
+            curr_yaw = self.yaw
+            c_yaw = complex(math.cos(curr_yaw), math.sin(curr_yaw))
+            c_change = c_new_yaw / c_yaw
+            dir = 1 if c_change.imag > 0 else -1
+        twist.angular.z = 0.0
+        self.publisher_.publish(twist)
+
+    def pick_direction(self):
+        frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
+        if len(frontiers) == 0:
+            raise Exception("No frontiers found")
+        
+        location = None
+        largest_dist = 0
+        for f in frontiers:
+            dist = math.sqrt((f[0] - self.currentPose.position.x)**2 + (f[1] - self.currentPose.position.y)**2)
+            if dist > largest_dist:
+                location = f
+                largest_dist = dist
+
+        delta_x = self.currentPose.position.x - location[0]
+        delta_y = self.currentPose.position.y - location[1]
+        angle = math.atan2(delta_y, delta_x)
+        self.get_logger().info(f'Angle: {angle}')
+        self.get_logger().info(f'Location: {location}')
+
+        self.rotateBot(angle)
+
+        self.get_logger().info('Rotated')
+
+        while (delta_x > 0.1 or delta_y > 0.1):
+            rclpy.spin_once(self)
+            delta_x = self.currentPose.position.x - location[0]
+            #delta_x = location[0] - self.currentPose.position.x
+            delta_y = self.currentPose.position.y - location[1]
+            #delta_y = location[1] - self.currentPose.position.y
+            angle = math.atan2(delta_y, delta_x)
+            self.get_logger().info(f'X: {delta_x}, Y: {delta_y}')
+            self.rotateBot(angle)
+
+            self.get_logger().info('Rotated')
+
+            twist = Twist()
+            twist.linear.x = 0.1
+            twist.angular.z = 0.0
+            time.sleep(1)
+            self.publisher_.publish(twist)
+            self.get_logger().info('Moving')
+            time.sleep(3)
+        
+
+    def stopbot(self):
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.0
+        self.publisher_.publish(twist)
+    
     def move(self):
-        return
+        try:
+            self.pick_direction()
+        except Exception as e:
+            self.get_logger().error(f'Error: {e}')
+        finally:
+            self.stopbot()
+
     
     def poseCallback(self, msg):
         self.info_msg('Received amcl_pose')
         self.currentPose = msg.pose.pose
+        orientation = self.currentPose.orientation
+        self.roll, self.pitch, self.yaw = euler_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
     
     def info_msg(self, msg: str):
         self.get_logger().info(msg)
@@ -244,7 +361,21 @@ class FrontierNav(Node):
 def main(args=None):
     rclpy.init(args=args)
     auto_nav = FrontierNav()
-    rclpy.spin(auto_nav)
+    while auto_nav.costmap is None and rclpy.ok():
+        auto_nav.get_logger().info("Waiting for occupancy grid...")
+        rclpy.spin_once(auto_nav, timeout_sec=0.5)
+    while rclpy.ok():
+        rclpy.spin_once(auto_nav, timeout_sec=0.1)
+
+        try:
+            auto_nav.move()
+        except Exception as e:
+            if "No frontiers found" in str(e):
+                auto_nav.get_logger().info("No more frontiers available. Shutting down.")
+                break
+            else:
+                auto_nav.get_logger().error(f'Error: {e}')
+
     auto_nav.destroy_node()
     rclpy.shutdown()
 

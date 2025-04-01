@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'final_nav'
+package_name = 'frontier'
 
 setup(
     name=package_name,
@@ -13,14 +13,15 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='manu',
-    maintainer_email='manudagur87@gmail.com',
+    maintainer='paterson',
+    maintainer_email='patersonwong@gmail.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'navigator = final_nav.frontier_nav:main',
+            'nav = frontier.frontier_nav:main',
+            'new_nav = frontier.frontier_new:main'
         ],
     },
 )
