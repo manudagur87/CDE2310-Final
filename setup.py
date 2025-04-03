@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'nav = frontier.frontier_nav:main',
-            'new_nav = frontier.frontier_new:main'
+            'nav = github_final_nav.frontier_nav:main',
+            #'new_nav = frontier.frontier_new:main'
         ],
     },
 )
