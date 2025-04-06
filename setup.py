@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'nav = github_final_nav.frontier_nav:main',
+            'frontier = github_final_nav.test_navigate:main',
             #'new_nav = frontier.frontier_new:main'
         ],
     },

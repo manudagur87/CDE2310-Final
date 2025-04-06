@@ -3,6 +3,7 @@ import time
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav2_msgs.action import FollowWaypoints
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav2_msgs.srv import GetCostmap
@@ -16,6 +17,7 @@ import tf2_geometry_msgs
 
 import rclpy
 import rclpy.time
+from rclpy.duration import Duration
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
@@ -29,7 +31,7 @@ import numpy as np
 import math
 
 OCC_THRESHOLD = 10
-MIN_FRONTIER_LIST = 2
+MIN_FRONTIER_LIST = 50
 
 class OccupancyGrid2d():
     class CostValues(Enum):
@@ -58,12 +60,10 @@ class OccupancyGrid2d():
 
     def worldToMap(self, wx, wy):
         if (wx < self.map.info.origin.position.x or wy < self.map.info.origin.position.y):
-            print(f'wx: {wx}, wy : {wy}')
-            print(f'origin: {self.map.info.origin.position.x}, {self.map.info.origin.position.y}')
             raise Exception("World coordinates out of bounds")
 
-        mx = int((wx - self.map.info.origin.position.x) / self.map.info.resolution)
-        my = int((wy - self.map.info.origin.position.y) / self.map.info.resolution)
+        mx = int((wx - self.map.info.origin.position.x) // self.map.info.resolution)
+        my = int((wy - self.map.info.origin.position.y) // self.map.info.resolution)
         
         if  (my > self.map.info.height or mx > self.map.info.width):
             raise Exception("Out of bounds")
@@ -139,9 +139,9 @@ def getFrontier(pose, costmap, logger):
 
     frontiers = []
 
-    print(f"map point: {mapPointQueue[0].mapX}, {mapPointQueue[0].mapY}")
-    print(f"map point: {mx}, {my}")
-    print(f"map point: {costmap.getCost(mapPointQueue[0].mapX, mapPointQueue[0].mapY)}")
+    #print(f"map point: {mapPointQueue[0].mapX}, {mapPointQueue[0].mapY}")
+    #print(f"map point: {mx}, {my}")
+    #print(f"map point: {costmap.getCost(mapPointQueue[0].mapX, mapPointQueue[0].mapY)}")
     while len(mapPointQueue) > 0:
         p = mapPointQueue.pop(0)
 
@@ -186,7 +186,7 @@ def getFrontier(pose, costmap, logger):
                     mapPointQueue.append(v)
 
         p.classification = p.classification | PointClassification.MapClosed.value
-
+    print(f"frontiers: {frontiers}")
     return frontiers
 
 def getNeighbors(point, costmap, fCache):
@@ -200,18 +200,18 @@ def getNeighbors(point, costmap, fCache):
     return neighbors
 
 def isFrontierPoint(point, costmap, fCache):
-    print(costmap.getCost(point.mapX, point.mapY))
+    #print(costmap.getCost(point.mapX, point.mapY))
     if costmap.getCost(point.mapX, point.mapY) != OccupancyGrid2d.CostValues.NoInformation.value:
         return False
-    print(costmap.getCost(point.mapX, point.mapY))
+    #print(costmap.getCost(point.mapX, point.mapY))
     hasFree = False
     for n in getNeighbors(point, costmap, fCache):
         cost = costmap.getCost(n.mapX, n.mapY)
-        print(f"x: {n.mapX}, y: {n.mapY}")
-        print(cost)
-        '''if cost > OCC_THRESHOLD:
-            print("exiting")
-            return False'''
+        #print(f"x: {n.mapX}, y: {n.mapY}")
+        #print(cost)
+        if cost > OCC_THRESHOLD:
+            #print("exiting")
+            return False
 
         if cost == OccupancyGrid2d.CostValues.FreeSpace.value:
             hasFree = True
@@ -272,10 +272,33 @@ class FrontierNav(Node):
         self.get_logger().info('Starting Navigation')
 
     def occupancyGridCallback(self, msg):
-        print(msg.data)
         self.costmap = OccupancyGrid2d(msg)
 
-    def rotateBot(self, angle):
+    def goal_pose(self,navigator):
+        rclpy.spin_once(self)
+        frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
+        if len(frontiers) == 0:
+            raise Exception("No frontiers found")
+        
+        location = None
+        largest_dist = 0
+        for f in frontiers:
+            dist = math.sqrt((f[0] - self.currentPose.position.x)**2 + (f[1] - self.currentPose.position.y)**2)
+            if dist > largest_dist:
+                location = f
+                largest_dist = dist
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = navigator.get_clock().now().to_msg()
+        goal_pose.pose.position.x = location[0]
+        goal_pose.pose.position.y = location[1]
+        goal_pose.pose.orientation.w = 1.0
+        goal_pose.pose.orientation.z = 0.0
+
+        return goal_pose
+
+    '''def rotateBot(self, angle):
         twist = Twist()
         curr_yaw = self.yaw
         c_yaw = complex(math.cos(curr_yaw), math.sin(curr_yaw))
@@ -286,8 +309,9 @@ class FrontierNav(Node):
         dir = 1 if c_change.imag > 0 else -1
 
         twist.linear.x = 0.0
-        twist.angular.z = 0.5 * dir
+        twist.angular.z = 0.3 * dir
         self.publisher_.publish(twist)
+        self.get_logger().info('Rotating')
 
         og_dir = dir
         while(og_dir*dir>0):
@@ -340,15 +364,61 @@ class FrontierNav(Node):
         twist = Twist()
         twist.linear.x = 0.0
         twist.angular.z = 0.0
-        self.publisher_.publish(twist)
+        self.publisher_.publish(twist)'''
     
-    def move(self):
-        try:
+    def move(self,navigator):
+        '''try:
             self.pick_direction()
         except Exception as e:
             self.get_logger().error(f'Error: {e}')
         finally:
-            self.stopbot()
+            self.stopbot()'''
+        init = PoseStamped()
+        init.header.frame_id = "map"
+        init.header.stamp = self.get_clock().now().to_msg()
+        init.pose = self.currentPose
+        navigator.setInitialPose(init)
+        #navigator.waitUntilNav2Active(localizer='slam_toolbox')
+        goal_pose = self.goal_pose(navigator)
+        navigator.goToPose(goal_pose)
+        i = 0
+        while not navigator.isTaskComplete():
+            rclpy.spin_once(self, timeout_sec=0.01)
+            i = i + 1
+            feedback = navigator.getFeedback()
+            if feedback and i % 5 == 0:
+                print(
+                    'Estimated time of arrival: '
+                    + '{0:.0f}'.format(
+                        Duration.from_msg(feedback.estimated_time_remaining).nanoseconds
+                        / 1e9
+                    )
+                    + ' seconds.'
+                )
+
+                # Some navigation timeout to demo cancellation
+                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=600.0):
+                    navigator.cancelTask()
+
+                # Some navigation request change to demo preemption
+                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=18.0):
+                    goal_pose.pose.position.x = 0.0
+                    goal_pose.pose.position.y = 0.0
+                    navigator.goToPose(goal_pose)
+        
+        result = navigator.getResult()
+        if result == TaskResult.SUCCEEDED:
+            print('Goal succeeded!')
+        elif result == TaskResult.CANCELED:
+            print('Goal was canceled!')
+        elif result == TaskResult.FAILED:
+            (error_code, error_msg) = navigator.getTaskError()
+            print('Goal failed!{error_code}:{error_msg}')
+        else:
+            print('Goal has an invalid return status!')
+        
+        
+        
 
     def transform_pose(self, input_pose, from_frame, to_frame):
         # Set the header frame id of the pose to be sure
@@ -398,13 +468,14 @@ class FrontierNav(Node):
 def main(args=None):
     rclpy.init(args=args)
     auto_nav = FrontierNav()
+    navigator = BasicNavigator()
     while auto_nav.costmap is None and rclpy.ok():
         auto_nav.get_logger().info("Waiting for occupancy grid...")
         rclpy.spin_once(auto_nav, timeout_sec=0.5)
     while rclpy.ok():
-        rclpy.spin_once(auto_nav, timeout_sec=0.1)
+        rclpy.spin_once(auto_nav, timeout_sec=0.5)
         try:
-            auto_nav.move()
+            auto_nav.move(navigator)
         except Exception as e:
             if "No frontiers found" in str(e):
                 auto_nav.get_logger().info("No more frontiers available. Shutting down.")
