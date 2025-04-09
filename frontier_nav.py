@@ -455,9 +455,9 @@ class FrontierNav(Node):
         for i in range(0, 360, 90):
             twist = Twist()
             twist.linear.x = 0.0
-            twist.angular.z = 0.3
+            twist.angular.z = 0.5
             self.publisher_.publish(twist)
-            time.sleep(1) #MUST CHANGE!!!!
+            time.sleep(3) #MUST CHANGE!!!!
             twist.angular.z = 0.0
             self.publisher_.publish(twist)
             time.sleep(1)
