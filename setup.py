@@ -21,7 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'nav = github_final_nav.frontier_nav:main',
-            'frontier = github_final_nav.test_navigate:main',
+            'thermal = github_final_nav.thermal_finder_nav:main',
             #'new_nav = frontier.frontier_new:main'
         ],
     },

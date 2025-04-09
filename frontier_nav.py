@@ -2,7 +2,7 @@ import sys
 import time
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, PointStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from nav2_msgs.action import FollowWaypoints
 from nav2_msgs.srv import ManageLifecycleNodes
@@ -10,7 +10,7 @@ from nav2_msgs.srv import GetCostmap
 from nav2_msgs.msg import Costmap
 from nav_msgs.msg  import OccupancyGrid
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Image
 
 import tf2_ros
 import tf2_geometry_msgs
@@ -32,6 +32,9 @@ import math
 
 OCC_THRESHOLD = 10
 MIN_FRONTIER_LIST = 50
+MERGE_RADIUS = 0.5
+THRESHOLD = 20
+FIELD_OF_VIEW = 60
 
 class OccupancyGrid2d():
     class CostValues(Enum):
@@ -252,49 +255,70 @@ class FrontierNav(Node):
         self.currentPose = None
         self.publisher_ = self.create_publisher(Twist,'cmd_vel',10)
 
-        pose_qos = QoSProfile(
+        '''pose_qos = QoSProfile(
           durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
           reliability=QoSReliabilityPolicy.RELIABLE,
           history=QoSHistoryPolicy.UNKNOWN,
-          depth=1)
+          depth=1)'''
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         self.model_pose_sub = self.create_subscription(Odometry, 'odom', self.poseCallback, 10)
-        self.roll = 0
+        '''self.roll = 0
         self.pitch = 0
-        self.yaw = 0
+        self.yaw = 0'''
 
         self.costmapSub = self.create_subscription(OccupancyGrid, 'map', self.occupancyGridCallback, qos_profile_sensor_data)
         self.costmap = None
         
         self.get_logger().info('Starting Navigation')
 
+        self.thermalSub = self.create_subscription(Image, '/thermal_image', self.thermal_image_callback, 10)
+        self.thermalpoint = None
+        self.visitedThermal = []
+        self.nearHeat = False
+
     def occupancyGridCallback(self, msg):
         self.costmap = OccupancyGrid2d(msg)
 
     def goal_pose(self,navigator):
         rclpy.spin_once(self)
-        frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
-        if len(frontiers) == 0:
-            raise Exception("No frontiers found")
+
+        visited = False
+        if self.thermalpoint is not None:
+            for (vx,vy) in self.visitedThermal:
+                if math.hypot(self.thermalpoint.point.x - vx, self.thermalpoint.point.y - vy) < MERGE_RADIUS:
+                    self.get_logger().info("Already visited thermal point")
+                    self.thermalpoint = None
+                    visited = True
+                    break
         
-        location = None
-        largest_dist = 0
-        for f in frontiers:
-            dist = math.sqrt((f[0] - self.currentPose.position.x)**2 + (f[1] - self.currentPose.position.y)**2)
-            if dist > largest_dist:
-                location = f
-                largest_dist = dist
+        if self.thermalpoint is None or visited:
+            frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
+            if len(frontiers) == 0:
+                raise Exception("No frontiers found")
+            
+            location = None
+            largest_dist = 0
+            for f in frontiers:
+                dist = math.sqrt((f[0] - self.currentPose.position.x)**2 + (f[1] - self.currentPose.position.y)**2)
+                if dist > largest_dist:
+                    location = f
+                    largest_dist = dist
+        else:
+
+            location = (self.thermalpoint.point.x, self.thermalpoint.point.y)
+
+
 
         goal_pose = PoseStamped()
         goal_pose.header.frame_id = 'map'
         goal_pose.header.stamp = navigator.get_clock().now().to_msg()
         goal_pose.pose.position.x = location[0]
         goal_pose.pose.position.y = location[1]
-        goal_pose.pose.orientation.w = 1.0
-        goal_pose.pose.orientation.z = 0.0
+        goal_pose.pose.orientation.w = self.currentPose.orientation.w
+        goal_pose.pose.orientation.z = self.currentPose.orientation.z
 
         return goal_pose
 
@@ -379,7 +403,16 @@ class FrontierNav(Node):
         init.pose = self.currentPose
         navigator.setInitialPose(init)
         #navigator.waitUntilNav2Active(localizer='slam_toolbox')
+        #WRITE CODE FOR TURNING 360 DEGREES TO LOOK FOR HEAT SIGNATURES
+        
         goal_pose = self.goal_pose(navigator)
+        if self.nearHeat:
+            #publish to solenoid node
+            time.sleep(15)
+            self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
+            self.thermalpoint = None
+            self.get_logger().info("Visited thermal point")
+            goal_pose = self.goal_pose(navigator)
         navigator.goToPose(goal_pose)
         i = 0
         while not navigator.isTaskComplete():
@@ -401,7 +434,7 @@ class FrontierNav(Node):
                     navigator.cancelTask()
 
                 # Some navigation request change to demo preemption
-                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=18.0):
+                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
                     goal_pose.pose.position.x = 0.0
                     goal_pose.pose.position.y = 0.0
                     navigator.goToPose(goal_pose)
@@ -417,10 +450,23 @@ class FrontierNav(Node):
         else:
             print('Goal has an invalid return status!')
         
-        
+
+    def rotate360(self):
+        for i in range(0, 360, 90):
+            twist = Twist()
+            twist.linear.x = 0.0
+            twist.angular.z = 0.3
+            self.publisher_.publish(twist)
+            time.sleep(1) #MUST CHANGE!!!!
+            twist.angular.z = 0.0
+            self.publisher_.publish(twist)
+            time.sleep(1)
+            rclpy.spin_once(self, timeout_sec=0.5)
+            time.sleep(3)
+            self.get_logger().info('Rotating')   
         
 
-    def transform_pose(self, input_pose, from_frame, to_frame):
+    def transform_pose(self, input_pose, from_frame, to_frame, pose=True):
         # Set the header frame id of the pose to be sure
         input_pose.header.frame_id = from_frame
         try:
@@ -432,7 +478,10 @@ class FrontierNav(Node):
                 now,
                 timeout=rclpy.duration.Duration(seconds=1.0)
             )
-            transformed_pose = tf2_geometry_msgs.do_transform_pose(input_pose.pose, transform)
+            if pose:
+                transformed_pose = tf2_geometry_msgs.do_transform_pose(input_pose.pose, transform)
+            else:
+                transformed_pose = tf2_geometry_msgs.do_transform_point(input_pose.point, transform)
             return transformed_pose
         except Exception as e:
             self.get_logger().error(f"Transform failed: {e}")
@@ -441,6 +490,7 @@ class FrontierNav(Node):
     def poseCallback(self, msg):
         self.info_msg('Received pose')
         self.currentPose = msg.pose.pose
+        self.ogPose = self.currentPose
         pose_stamped = PoseStamped()
         pose_stamped.header = msg.header
         pose_stamped.pose = self.currentPose
@@ -455,6 +505,44 @@ class FrontierNav(Node):
             self.get_logger().error("Failed to transform pose")
             orientation = self.currentPose.orientation
             self.roll, self.pitch, self.yaw = euler_from_quaternion(orientation.x, orientation.y, orientation.z, orientation.w)
+        ogorientation = self.ogPose.orientation
+        self.ogroll, self.ogpitch, self.ogyaw = euler_from_quaternion(ogorientation.x, ogorientation.y, ogorientation.z, ogorientation.w)
+    
+    def thermal(self, msg):
+        self.info_msg('Received thermal point')
+        self.thermalpoint = msg.point
+        point_stamped = PointStamped()
+        point_stamped.header = msg.header
+        #setting the thermal point x and y positions with respect to the map!
+        point_stamped.point.x = self.ogPose.position.x + math.hypot(self.thermalpoint.point.x, self.thermalpoint.point.y)*math.sin((math.pi/2)-self.ogyaw-self.bearing)
+        point_stamped.point.x = self.ogPose.position.y + math.hypot(self.thermalpoint.point.x, self.thermalpoint.point.y)*math.cos((math.pi/2)-self.ogyaw-self.bearing)
+        transformed = self.transform_pose(point_stamped, from_frame="odom", to_frame="map", pose=False)
+        if transformed is not None:
+            print("Transformed point successfully")
+            self.thermalpoint = transformed
+        else:
+            self.get_logger().error("Failed to transform point")
+    
+    def thermal_image_callback(self, msg):
+        image_data = np.frombuffer(msg.data, dtype=np.float32).reshape((8, 8))
+        max_val = np.max(image_data)
+        if max_val < THRESHOLD:
+            self.get_logger().info('No target detected.')
+            return
+        
+        (py,px) = np.unravel_index(np.argmax(image_data, image_data.shape))
+        self.bearing = ((px-3.5)/7)*np.deg2rad(FIELD_OF_VIEW)
+
+        point = PointStamped()
+        point.header = msg.header
+        point.point.x = self.x_calc()
+        point.point.y = np.tan(self.bearing)*self.x_calc()
+
+        self.thermal(point)
+
+    def x_calc(self):
+        self.nearHeat = False
+        return        
     
     def info_msg(self, msg: str):
         self.get_logger().info(msg)
@@ -473,9 +561,9 @@ def main(args=None):
         auto_nav.get_logger().info("Waiting for occupancy grid...")
         rclpy.spin_once(auto_nav, timeout_sec=0.5)
     while rclpy.ok():
-        rclpy.spin_once(auto_nav, timeout_sec=0.5)
         try:
             auto_nav.move(navigator)
+            auto_nav.rotate360()
         except Exception as e:
             if "No frontiers found" in str(e):
                 auto_nav.get_logger().info("No more frontiers available. Shutting down.")
@@ -484,6 +572,7 @@ def main(args=None):
                 auto_nav.get_logger().error(f'Error: {e}')
     
     time.sleep(4)
+    navigator.lifecycleShutdown()
     auto_nav.destroy_node()
     rclpy.shutdown()
 
