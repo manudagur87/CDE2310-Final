@@ -28,13 +28,17 @@ from enum import Enum
 
 import numpy as np
 
-import math
+import math, cmath
 
 OCC_THRESHOLD = 10
 MIN_FRONTIER_LIST = 50
 MERGE_RADIUS = 0.5
 THRESHOLD = 20
 FIELD_OF_VIEW = 60
+ROTATE_CHANGE = 0.1
+SPEED_CHANGE = 0.1
+FRONT_ANGLE = 30
+STOP_DISTANCE = 0.25
 
 class OccupancyGrid2d():
     class CostValues(Enum):
@@ -279,12 +283,19 @@ class FrontierNav(Node):
         self.visitedThermal = []
         self.nearHeat = False
 
+        self.scan_subscription = self.create_subscription(LaserScan, 'scan', self.scan_callback, qos_profile_sensor_data)   
+        self.laser_range = np.array([])   
+        self.allFrontier = False  
+
     def occupancyGridCallback(self, msg):
         self.costmap = OccupancyGrid2d(msg)
 
     def goal_pose(self,navigator):
         rclpy.spin_once(self)
 
+        if(self.allFrontier and self.thermalpoint is None):
+            return None
+        
         visited = False
         if self.thermalpoint is not None:
             for (vx,vy) in self.visitedThermal:
@@ -294,10 +305,10 @@ class FrontierNav(Node):
                     visited = True
                     break
         
-        if self.thermalpoint is None or visited:
+        if (self.thermalpoint is None or visited) and not self.allFrontier:
             frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
             if len(frontiers) == 0:
-                raise Exception("No frontiers found")
+                self.allFrontier = True
             
             location = None
             largest_dist = 0
@@ -449,8 +460,150 @@ class FrontierNav(Node):
             print('Goal failed!{error_code}:{error_msg}')
         else:
             print('Goal has an invalid return status!')
-        
 
+    def rotatebot(self, rot_angle):
+        # self.get_logger().info('In rotatebot')
+        # create Twist object
+        twist = Twist()
+        
+        # get current yaw angle
+        current_yaw = self.yaw
+        # log the info
+        self.get_logger().info('Current: %f' % math.degrees(current_yaw))
+        # we are going to use complex numbers to avoid problems when the angles go from
+        # 360 to 0, or from -180 to 180
+        c_yaw = complex(math.cos(current_yaw),math.sin(current_yaw))
+        # calculate desired yaw
+        target_yaw = current_yaw + math.radians(rot_angle)
+        # convert to complex notation
+        c_target_yaw = complex(math.cos(target_yaw),math.sin(target_yaw))
+        self.get_logger().info('Desired: %f' % math.degrees(cmath.phase(c_target_yaw)))
+        # divide the two complex numbers to get the change in direction
+        c_change = c_target_yaw / c_yaw
+        # get the sign of the imaginary component to figure out which way we have to turn
+        c_change_dir = np.sign(c_change.imag)
+        # set linear speed to zero so the TurtleBot rotates on the spot
+        twist.linear.x = 0.0
+        # set the direction to rotate
+        twist.angular.z = c_change_dir * ROTATE_CHANGE
+        # start rotation
+        self.publisher_.publish(twist)
+
+        # we will use the c_dir_diff variable to see if we can stop rotating
+        c_dir_diff = c_change_dir
+        # self.get_logger().info('c_change_dir: %f c_dir_diff: %f' % (c_change_dir, c_dir_diff))
+        # if the rotation direction was 1.0, then we will want to stop when the c_dir_diff
+        # becomes -1.0, and vice versa
+        while(c_change_dir * c_dir_diff > 0):
+            # allow the callback functions to run
+            rclpy.spin_once(self)
+            current_yaw = self.yaw
+            # convert the current yaw to complex form
+            c_yaw = complex(math.cos(current_yaw),math.sin(current_yaw))
+            # self.get_logger().info('Current Yaw: %f' % math.degrees(current_yaw))
+            # get difference in angle between current and target
+            c_change = c_target_yaw / c_yaw
+            # get the sign to see if we can stop
+            c_dir_diff = np.sign(c_change.imag)
+            # self.get_logger().info('c_change_dir: %f c_dir_diff: %f' % (c_change_dir, c_dir_diff))
+
+        self.get_logger().info('End Yaw: %f' % math.degrees(current_yaw))
+        # set the rotation speed to 0
+        twist.angular.z = 0.0
+        # stop the rotation
+        self.publisher_.publish(twist)
+
+
+    def pick_direction(self):
+        # self.get_logger().info('In pick_direction')
+        if self.laser_range.size != 0:
+            # use nanargmax as there are nan's in laser_range added to replace 0's
+            lr2i = np.nanargmax(self.laser_range)
+            self.get_logger().info('Picked direction: %d %f m' % (lr2i, self.laser_range[lr2i]))
+        else:
+            lr2i = 0
+            self.get_logger().info('No data!')
+
+        # rotate to that direction
+        self.rotatebot(float(lr2i))
+
+        # start moving
+        self.get_logger().info('Start moving')
+        twist = Twist()
+        twist.linear.x = SPEED_CHANGE
+        twist.angular.z = 0.0
+        # not sure if this is really necessary, but things seem to work more
+        # reliably with this
+        time.sleep(1)
+        self.publisher_.publish(twist)
+
+    def randomWalk(self,navigator):
+        goal_pose = self.goal_pose(navigator)
+        if goal_pose is not None:
+            if self.nearHeat:
+                #publish to solenoid node
+                time.sleep(15)
+                self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
+                self.thermalpoint = None
+                self.get_logger().info("Visited thermal point")
+                goal_pose = self.goal_pose(navigator)
+            navigator.goToPose(goal_pose)
+            i = 0
+            while not navigator.isTaskComplete():
+                rclpy.spin_once(self, timeout_sec=0.01)
+                i = i + 1
+                feedback = navigator.getFeedback()
+                if feedback and i % 5 == 0:
+                    print(
+                        'Estimated time of arrival: '
+                        + '{0:.0f}'.format(
+                            Duration.from_msg(feedback.estimated_time_remaining).nanoseconds
+                            / 1e9
+                        )
+                        + ' seconds.'
+                    )
+
+                    # Some navigation timeout to demo cancellation
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds=600.0):
+                        navigator.cancelTask()
+
+                    # Some navigation request change to demo preemption
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
+                        goal_pose.pose.position.x = 0.0
+                        goal_pose.pose.position.y = 0.0
+                        navigator.goToPose(goal_pose)
+            
+            result = navigator.getResult()
+            if result == TaskResult.SUCCEEDED:
+                print('Goal succeeded!')
+            elif result == TaskResult.CANCELED:
+                print('Goal was canceled!')
+            elif result == TaskResult.FAILED:
+                (error_code, error_msg) = navigator.getTaskError()
+                print('Goal failed!{error_code}:{error_msg}')
+            else:
+                print('Goal has an invalid return status!')
+        else:
+            try:
+                self.pick_direction()
+                if self.laser_range.size != 0:
+                    lri = (self.laser_range[FRONT_ANGLE]<float(STOP_DISTANCE)).nonzero()
+                    # self.get_logger().info('Distances: %s' % str(lri))
+
+                    # if the list is not empty
+                    if(len(lri[0])>0):
+                        # stop moving
+                        self.stopbot()
+                        # find direction with the largest distance from the Lidar
+                        # rotate to that direction
+                        # start moving
+                        self.pick_direction()
+                rclpy.spin_once(self) 
+            except Exception as e:
+                self.get_logger().error(f'Error: {e}')
+            finally:
+                self.stopbot()  
+     
     def rotate360(self):
         for i in range(0, 360, 90):
             twist = Twist()
@@ -542,7 +695,11 @@ class FrontierNav(Node):
 
     def x_calc(self):
         self.nearHeat = False
-        return        
+        return    
+
+    def scan_callback(self, msg):
+        self.laser_range = np.array(msg.ranges)
+        self.laser_range[self.laser_range==0] = np.nan    
     
     def info_msg(self, msg: str):
         self.get_logger().info(msg)
@@ -562,8 +719,12 @@ def main(args=None):
         rclpy.spin_once(auto_nav, timeout_sec=0.5)
     while rclpy.ok():
         try:
-            auto_nav.move(navigator)
-            auto_nav.rotate360()
+            if auto_nav.allFrontier:
+                auto_nav.randomWalk(navigator)
+                auto_nav.rotate360()
+            else:
+                auto_nav.move(navigator)
+                auto_nav.rotate360()
         except Exception as e:
             if "No frontiers found" in str(e):
                 auto_nav.get_logger().info("No more frontiers available. Shutting down.")
