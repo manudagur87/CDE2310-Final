@@ -32,7 +32,7 @@ import numpy as np
 import math, cmath
 
 OCC_THRESHOLD = 10
-MIN_FRONTIER_LIST = 50
+MIN_FRONTIER_LIST = 40
 MERGE_RADIUS = 0.5
 THRESHOLD = 24
 FIELD_OF_VIEW = 60
@@ -110,7 +110,9 @@ def centroid(arr):
     length = arr.shape[0]
     sum_x = np.sum(arr[:, 0])
     sum_y = np.sum(arr[:, 1])
-    return sum_x/length, sum_y/length
+    median_x = np.median(arr[:, 0])
+    median_y = np.median(arr[:, 1])
+    return median_x, median_y
 
 def findFree(mx, my, costmap):
     fCache = FrontierCache()
@@ -282,10 +284,11 @@ class FrontierNav(Node):
         
         self.get_logger().info('Starting Navigation')
 
-        self.thermalSub = self.create_subscription(Float64MultiArray, 'heat_sensor', self.thermal_image_callback, 10)
+        self.thermalSub = self.create_subscription(Float64MultiArray, 'thermal_image', self.thermal_image_callback, 10)
         self.thermalpoint = None
         self.visitedThermal = []
         self.nearHeat = False
+        self.thermalRan = False
 
         self.scan_subscription = self.create_subscription(LaserScan, 'scan', self.scan_callback, qos_profile_sensor_data)   
         self.laser_range = np.array([])   
@@ -296,9 +299,7 @@ class FrontierNav(Node):
 
     def goal_pose(self,navigator):
         rclpy.spin_once(self)
-
-        
-        
+        time.sleep(0.1)
         visited = False
         if self.thermalpoint is not None:
             for (vx,vy) in self.visitedThermal:
@@ -309,6 +310,7 @@ class FrontierNav(Node):
                     break
         if(self.allFrontier and self.thermalpoint is None):
             location = (self.randompoint.point.x, self.randompoint.point.y)
+            self.get_logger().info("Sending randompoint")
         
         elif((self.thermalpoint is None or visited) and not self.allFrontier):
             frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
@@ -322,9 +324,11 @@ class FrontierNav(Node):
                 if dist > largest_dist:
                     location = f
                     largest_dist = dist
+            self.get_logger().info("Sending Frontier")
         else:
-
-            location = (self.thermalpoint.point.x, self.thermalpoint.point.y)
+            location = (self.thermalpoint.point.x/10, self.thermalpoint.point.y/10)
+            self.get_logger().info("Sending Thermalpoint")
+            self.get_logger().info(f"Thermalpoint: {self.thermalpoint.point.x}, {self.thermalpoint.point.y}")
 
 
 
@@ -413,6 +417,10 @@ class FrontierNav(Node):
             self.get_logger().error(f'Error: {e}')
         finally:
             self.stopbot()'''
+        if self.thermalRan == False:
+            self.get_logger().info("Waiting for thermal image data...")
+            return
+        
         init = PoseStamped()
         init.header.frame_id = "map"
         init.header.stamp = self.get_clock().now().to_msg()
@@ -422,6 +430,7 @@ class FrontierNav(Node):
         #WRITE CODE FOR TURNING 360 DEGREES TO LOOK FOR HEAT SIGNATURES
         
         goal_pose = self.goal_pose(navigator)
+        return
         if self.nearHeat:
             self.launch_.publish(Int8(1))
             time.sleep(15)
@@ -431,6 +440,7 @@ class FrontierNav(Node):
             self.get_logger().info("Visited thermal point")
             goal_pose = self.goal_pose(navigator)
         navigator.goToPose(goal_pose)
+        now = time.time()
         i = 0
         while not navigator.isTaskComplete():
             rclpy.spin_once(self, timeout_sec=0.01)
@@ -447,14 +457,14 @@ class FrontierNav(Node):
                 )
 
                 # Some navigation timeout to demo cancellation
-                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=600.0):
+                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
                     navigator.cancelTask()
 
                 # Some navigation request change to demo preemption
-                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
+                '''if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
                     goal_pose.pose.position.x = 0.0
                     goal_pose.pose.position.y = 0.0
-                    navigator.goToPose(goal_pose)
+                    navigator.goToPose(goal_pose)'''
         
         result = navigator.getResult()
         if result == TaskResult.SUCCEEDED:
@@ -543,7 +553,7 @@ class FrontierNav(Node):
             self.publisher_.publish(twist)
             time.sleep(1)
             rclpy.spin_once(self, timeout_sec=0.5)
-            time.sleep(3)
+            time.sleep(1)
             self.get_logger().info('Rotating')   
         
 
@@ -605,13 +615,14 @@ class FrontierNav(Node):
             self.get_logger().error("Failed to transform point")'''
     
     def thermal_image_callback(self, msg):
+        self.thermalRan = True
         self.image_data = msg.data
         if len(self.image_data) != 64:
             self.get_logger().warn("Received data does not contain 64 elements.") # for error checking
             return
         
         max_val = np.max(self.image_data)
-        if max_val < THRESHOLD:
+        if max_val < THRESHOLD or self.ogPose is None:
             self.get_logger().info('No target detected.')
             return
         
@@ -620,7 +631,7 @@ class FrontierNav(Node):
         col = max_index % 8
 
         #(py,px) = np.unravel_index(np.argmax(image_data, image_data.shape))
-        self.bearing = ((self.col-3.5)/7)*np.deg2rad(FIELD_OF_VIEW)
+        self.bearing = ((col-3.5)/7)*np.deg2rad(FIELD_OF_VIEW)
 
         self.thermalpoint = PointStamped()
         self.thermalpoint.header.stamp = self.get_clock().now().to_msg()
@@ -629,7 +640,7 @@ class FrontierNav(Node):
         self.thermalpoint.point.y = float(self.ogPose.position.y+(self.x_calc(col)*math.cos((math.pi/2)-self.ogyaw-self.bearing)))
         transformed = self.transform_pose(self.thermalpoint, from_frame="odom", to_frame="map", pose=False)
         if transformed is not None:
-            print("Transformed randompoint successfully")
+            print("Transformed thermalpoint successfully")
             self.thermalpoint = transformed
         else:
             self.get_logger().error("Failed to transform point")
@@ -689,8 +700,9 @@ def main(args=None):
             '''if auto_nav.allFrontier:
                 auto_nav.randomWalk(navigator)
                 auto_nav.rotate360()'''
+            #rclpy.spin(auto_nav)
             auto_nav.move(navigator)
-            auto_nav.rotate360()
+            #auto_nav.rotate360()
         except Exception as e:
             if "No frontiers found" in str(e):
                 auto_nav.get_logger().info("No more frontiers available. Shutting down.")
