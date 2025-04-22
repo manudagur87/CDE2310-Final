@@ -40,6 +40,7 @@ ROTATE_CHANGE = 0.1
 SPEED_CHANGE = 0.1
 FRONT_ANGLE = 30
 STOP_DISTANCE = 0.25
+SAFETY_DIST = 0.5
 
 class OccupancyGrid2d():
     class CostValues(Enum):
@@ -293,11 +294,13 @@ class FrontierNav(Node):
         self.scan_subscription = self.create_subscription(LaserScan, 'scan', self.scan_callback, qos_profile_sensor_data)   
         self.laser_range = np.array([])   
         self.allFrontier = False  
+        self.angle_min = None
 
     def occupancyGridCallback(self, msg):
         self.costmap = OccupancyGrid2d(msg)
 
     def goal_pose(self,navigator):
+        self.thermalgoal = False
         rclpy.spin_once(self)
         time.sleep(0.1)
         visited = False
@@ -326,9 +329,10 @@ class FrontierNav(Node):
                     largest_dist = dist
             self.get_logger().info("Sending Frontier")
         else:
-            location = (self.thermalpoint.point.x/10, self.thermalpoint.point.y/10)
+            location = (self.thermalpoint.point.x, self.thermalpoint.point.y)
             self.get_logger().info("Sending Thermalpoint")
-            self.get_logger().info(f"Thermalpoint: {self.thermalpoint.point.x}, {self.thermalpoint.point.y}")
+            self.thermalgoal = True
+            #self.get_logger().info(f"Thermalpoint: {self.thermalpoint.point.x}, {self.thermalpoint.point.y}")
 
 
 
@@ -411,36 +415,27 @@ class FrontierNav(Node):
         self.publisher_.publish(twist)'''
     
     def move(self,navigator):
-        '''try:
-            self.pick_direction()
-        except Exception as e:
-            self.get_logger().error(f'Error: {e}')
-        finally:
-            self.stopbot()'''
-        if self.thermalRan == False:
-            self.get_logger().info("Waiting for thermal image data...")
-            return
-        
         init = PoseStamped()
         init.header.frame_id = "map"
         init.header.stamp = self.get_clock().now().to_msg()
         init.pose = self.currentPose
         navigator.setInitialPose(init)
+        #print("Initial pose set")
+        #print(init.pose.position.x,init.pose.position.y)
         #navigator.waitUntilNav2Active(localizer='slam_toolbox')
         #WRITE CODE FOR TURNING 360 DEGREES TO LOOK FOR HEAT SIGNATURES
         
         goal_pose = self.goal_pose(navigator)
-        return
-        if self.nearHeat:
+        '''if self.nearHeat:
             self.launch_.publish(Int8(1))
             time.sleep(15)
             self.nearHeat = False
             self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
             self.thermalpoint = None
             self.get_logger().info("Visited thermal point")
-            goal_pose = self.goal_pose(navigator)
+            goal_pose = self.goal_pose(navigator)'''
         navigator.goToPose(goal_pose)
-        now = time.time()
+        #now = time.time()
         i = 0
         while not navigator.isTaskComplete():
             rclpy.spin_once(self, timeout_sec=0.01)
@@ -458,7 +453,8 @@ class FrontierNav(Node):
 
                 # Some navigation timeout to demo cancellation
                 if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
-                    navigator.cancelTask()
+                    if self.thermalgoal==False:
+                        navigator.cancelTask()
 
                 # Some navigation request change to demo preemption
                 '''if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
@@ -468,6 +464,14 @@ class FrontierNav(Node):
         
         result = navigator.getResult()
         if result == TaskResult.SUCCEEDED:
+            if self.thermalgoal==True:
+                self.launch_.publish(Int8(1))
+                time.sleep(15)
+                self.nearHeat = False
+                self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
+                self.thermalpoint = None
+                self.get_logger().info("Visited thermal point")
+                goal_pose = self.goal_pose(navigator)
             print('Goal succeeded!')
         elif result == TaskResult.CANCELED:
             print('Goal was canceled!')
@@ -615,11 +619,15 @@ class FrontierNav(Node):
             self.get_logger().error("Failed to transform point")'''
     
     def thermal_image_callback(self, msg):
+        if len(self.laser_range)==0:
+            return
         self.thermalRan = True
         self.image_data = msg.data
         if len(self.image_data) != 64:
             self.get_logger().warn("Received data does not contain 64 elements.") # for error checking
             return
+        
+        
         
         max_val = np.max(self.image_data)
         if max_val < THRESHOLD or self.ogPose is None:
@@ -630,14 +638,48 @@ class FrontierNav(Node):
         row = max_index // 8
         col = max_index % 8
 
+        avg_val = 0
+        for i in range(8):
+            avg_val += self.image_data[col+(8*i)]
+        avg_val = avg_val/8
+
+        if avg_val > 35.5:
+            self.nearHeat = True
+            return
+
         #(py,px) = np.unravel_index(np.argmax(image_data, image_data.shape))
-        self.bearing = ((col-3.5)/7)*np.deg2rad(FIELD_OF_VIEW)
+        self.bearing = ((col-3.5)/7)*FIELD_OF_VIEW
+
+        global_angle = self.ogyaw + np.deg2rad(self.bearing)
+        '''angle_min       = self.angle_min
+        angle_increment = self.angle_increment
+        idx = int(round((self.bearing - angle_min) / angle_increment))
+        idx = max(0, min(idx, len(self.laser_range) - 1))
+        distance = self.laser_range[idx]'''
 
         self.thermalpoint = PointStamped()
         self.thermalpoint.header.stamp = self.get_clock().now().to_msg()
         self.thermalpoint.header.frame_id = 'odom'
-        self.thermalpoint.point.x = float(self.ogPose.position.x+(self.x_calc(col)*math.sin((math.pi/2)-self.ogyaw-self.bearing)))
-        self.thermalpoint.point.y = float(self.ogPose.position.y+(self.x_calc(col)*math.cos((math.pi/2)-self.ogyaw-self.bearing)))
+        cleaned = self.laser_range[~np.isnan(self.laser_range)]
+        final =[]
+        if(self.bearing<0):
+            final.append(cleaned[math.floor((self.bearing*11/18))])
+            for i in range(1,4):
+                if (math.floor((self.bearing*11/18))+i)<len(cleaned):
+                    final.append(cleaned[math.floor((self.bearing*11/18))+i])
+                if (math.floor((self.bearing*11/18))-i)>0: 
+                    final.append(cleaned[math.floor((self.bearing*11/18))-i])
+            distance = np.min(final)
+        else:
+            final.append(cleaned[len(cleaned)-math.floor((self.bearing*11/18))])
+            for i in range(1,4):
+                if (len(cleaned)-math.floor((self.bearing*11/18))+i)<len(cleaned):
+                    final.append(cleaned[len(cleaned)-math.floor((self.bearing*11/18))+i])
+                if (len(cleaned)-math.floor((self.bearing*11/18))-i)>0:
+                    final.append(cleaned[len(cleaned)-math.floor((self.bearing*11/18))-i])
+            distance = np.min(final)
+        self.thermalpoint.point.x = float(self.ogPose.position.x+(distance*math.cos(global_angle)))
+        self.thermalpoint.point.y = float(self.ogPose.position.y+(distance*math.sin(global_angle)))
         transformed = self.transform_pose(self.thermalpoint, from_frame="odom", to_frame="map", pose=False)
         if transformed is not None:
             print("Transformed thermalpoint successfully")
@@ -645,19 +687,22 @@ class FrontierNav(Node):
         else:
             self.get_logger().error("Failed to transform point")
 
-    def x_calc(self, col):
+    '''def x_calc(self, col):
         avg_val = 0
         for i in range(8):
             avg_val += self.image_data[col+(8*i)]
         avg_val = avg_val/8
         x_calc = math.sqrt(360.3/(avg_val-21.86))
 
-        if x_calc > 35.5:
+        if avg_val > 35.5:
             self.nearHeat = True
 
-        return x_calc
+        return x_calc'''
 
     def scan_callback(self, msg):
+        self.angle_min = msg.angle_min
+        self.angle_max = msg.angle_max
+        self.angle_increment = msg.angle_increment
         if not self.ogPose:
             return
         self.laser_range = np.array(msg.ranges)

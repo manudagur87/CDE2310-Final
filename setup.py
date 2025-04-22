@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'frontier'
+package_name = 'github_final_nav'
 
 setup(
     name=package_name,
@@ -13,16 +13,15 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='paterson',
-    maintainer_email='patersonwong@gmail.com',
+    maintainer='manu',
+    maintainer_email='manudagur87@gmail.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'nav = github_final_nav.frontier_nav:main',
-            'thermal = github_final_nav.thermal_finder_nav:main',
-            #'new_nav = frontier.frontier_new:main'
+            'thermal = github_final_nav.thermal_finder_nav:main'
         ],
     },
 )
