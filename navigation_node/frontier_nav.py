@@ -1,13 +1,7 @@
-import sys
 import time
 
-from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, PointStamped
+from geometry_msgs.msg import PoseStamped, Twist, PointStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-from nav2_msgs.action import FollowWaypoints
-from nav2_msgs.srv import ManageLifecycleNodes
-from nav2_msgs.srv import GetCostmap
-from nav2_msgs.msg import Costmap
 from nav_msgs.msg  import OccupancyGrid
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -21,15 +15,13 @@ import rclpy.time
 from rclpy.duration import Duration
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
-from rclpy.qos import QoSProfile
 from rclpy.qos import qos_profile_sensor_data
 
 from enum import Enum
 
 import numpy as np
 
-import math, cmath
+import math
 
 OCC_THRESHOLD = 10
 MIN_FRONTIER_LIST = 40
@@ -150,9 +142,6 @@ def getFrontier(pose, costmap, logger):
 
     frontiers = []
 
-    #print(f"map point: {mapPointQueue[0].mapX}, {mapPointQueue[0].mapY}")
-    #print(f"map point: {mx}, {my}")
-    #print(f"map point: {costmap.getCost(mapPointQueue[0].mapX, mapPointQueue[0].mapY)}")
     while len(mapPointQueue) > 0:
         p = mapPointQueue.pop(0)
 
@@ -211,17 +200,12 @@ def getNeighbors(point, costmap, fCache):
     return neighbors
 
 def isFrontierPoint(point, costmap, fCache):
-    #print(costmap.getCost(point.mapX, point.mapY))
     if costmap.getCost(point.mapX, point.mapY) != OccupancyGrid2d.CostValues.NoInformation.value:
         return False
-    #print(costmap.getCost(point.mapX, point.mapY))
     hasFree = False
     for n in getNeighbors(point, costmap, fCache):
         cost = costmap.getCost(n.mapX, n.mapY)
-        #print(f"x: {n.mapX}, y: {n.mapY}")
-        #print(cost)
         if cost > OCC_THRESHOLD:
-            #print("exiting")
             return False
 
         if cost == OccupancyGrid2d.CostValues.FreeSpace.value:
@@ -264,21 +248,12 @@ class FrontierNav(Node):
         self.publisher_ = self.create_publisher(Twist,'cmd_vel',10)
         self.launch_ = self.create_publisher(Int8, 'launch_topic', 10)
 
-        '''pose_qos = QoSProfile(
-          durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-          reliability=QoSReliabilityPolicy.RELIABLE,
-          history=QoSHistoryPolicy.UNKNOWN,
-          depth=1)'''
-
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         self.model_pose_sub = self.create_subscription(Odometry, 'odom', self.poseCallback, 10)
         self.ogPose = None
         time.sleep(1)
-        '''self.roll = 0
-        self.pitch = 0
-        self.yaw = 0'''
 
         self.costmapSub = self.create_subscription(OccupancyGrid, 'map', self.occupancyGridCallback, qos_profile_sensor_data)
         self.costmap = None
@@ -332,7 +307,6 @@ class FrontierNav(Node):
             location = (self.thermalpoint.point.x, self.thermalpoint.point.y)
             self.get_logger().info("Sending Thermalpoint")
             self.thermalgoal = True
-            #self.get_logger().info(f"Thermalpoint: {self.thermalpoint.point.x}, {self.thermalpoint.point.y}")
 
 
 
@@ -345,74 +319,6 @@ class FrontierNav(Node):
         goal_pose.pose.orientation.z = self.currentPose.orientation.z
 
         return goal_pose
-
-    '''def rotateBot(self, angle):
-        twist = Twist()
-        curr_yaw = self.yaw
-        c_yaw = complex(math.cos(curr_yaw), math.sin(curr_yaw))
-        new_yaw = curr_yaw + angle
-        c_new_yaw = complex(math.cos(new_yaw), math.sin(new_yaw))
-
-        c_change = c_new_yaw / c_yaw
-        dir = 1 if c_change.imag > 0 else -1
-
-        twist.linear.x = 0.0
-        twist.angular.z = 0.3 * dir
-        self.publisher_.publish(twist)
-        self.get_logger().info('Rotating')
-
-        og_dir = dir
-        while(og_dir*dir>0):
-            rclpy.spin_once(self)
-            curr_yaw = self.yaw
-            c_yaw = complex(math.cos(curr_yaw), math.sin(curr_yaw))
-            c_change = c_new_yaw / c_yaw
-            dir = 1 if c_change.imag > 0 else -1
-        twist.angular.z = 0.0
-        self.publisher_.publish(twist)
-
-    def pick_direction(self):
-        frontiers = getFrontier(self.currentPose, self.costmap, self.get_logger())
-        if len(frontiers) == 0:
-            raise Exception("No frontiers found")
-        
-        location = None
-        largest_dist = 0
-        for f in frontiers:
-            dist = math.sqrt((f[0] - self.currentPose.position.x)**2 + (f[1] - self.currentPose.position.y)**2)
-            if dist > largest_dist:
-                location = f
-                largest_dist = dist
-
-        delta_x = self.currentPose.position.x - location[0]
-        delta_y = self.currentPose.position.y - location[1]
-        angle = math.atan2(delta_y, delta_x)
-        self.get_logger().info(f'Angle: {angle}')
-        self.get_logger().info(f'Location: {location}')
-
-        self.rotateBot(angle)
-
-        self.get_logger().info('Rotated')
-
-        while (delta_x > 0.1 or delta_y > 0.1):
-            rclpy.spin_once(self)
-            delta_x = self.currentPose.position.x - location[0]
-            #delta_x = location[0] - self.currentPose.position.x
-            delta_y = self.currentPose.position.y - location[1]
-
-            twist = Twist()
-            twist.linear.x = 0.1
-            twist.angular.z = 0.0
-            time.sleep(1)
-            self.publisher_.publish(twist)
-            self.get_logger().info('Moving')
-        
-
-    def stopbot(self):
-        twist = Twist()
-        twist.linear.x = 0.0
-        twist.angular.z = 0.0
-        self.publisher_.publish(twist)'''
     
     def move(self,navigator):
         init = PoseStamped()
@@ -426,16 +332,7 @@ class FrontierNav(Node):
         #WRITE CODE FOR TURNING 360 DEGREES TO LOOK FOR HEAT SIGNATURES
         
         goal_pose = self.goal_pose(navigator)
-        '''if self.nearHeat:
-            self.launch_.publish(Int8(1))
-            time.sleep(15)
-            self.nearHeat = False
-            self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
-            self.thermalpoint = None
-            self.get_logger().info("Visited thermal point")
-            goal_pose = self.goal_pose(navigator)'''
         navigator.goToPose(goal_pose)
-        #now = time.time()
         i = 0
         while not navigator.isTaskComplete():
             rclpy.spin_once(self, timeout_sec=0.01)
@@ -455,12 +352,6 @@ class FrontierNav(Node):
                 if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
                     if self.thermalgoal==False:
                         navigator.cancelTask()
-
-                # Some navigation request change to demo preemption
-                '''if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
-                    goal_pose.pose.position.x = 0.0
-                    goal_pose.pose.position.y = 0.0
-                    navigator.goToPose(goal_pose)'''
         
         result = navigator.getResult()
         if result == TaskResult.SUCCEEDED:
@@ -479,86 +370,7 @@ class FrontierNav(Node):
             (error_code, error_msg) = navigator.getTaskError()
             print('Goal failed!{error_code}:{error_msg}')
         else:
-            print('Goal has an invalid return status!')
-
-    '''def randomWalk(self,navigator):
-        goal_pose = self.goal_pose(navigator)
-        if goal_pose is not None:
-            if self.nearHeat:
-                #publish to solenoid node
-                time.sleep(15)
-                self.visitedThermal.append((self.thermalpoint.point.x, self.thermalpoint.point.y))
-                self.thermalpoint = None
-                self.get_logger().info("Visited thermal point")
-                goal_pose = self.goal_pose(navigator)
-            navigator.goToPose(goal_pose)
-            i = 0
-            while not navigator.isTaskComplete():
-                rclpy.spin_once(self, timeout_sec=0.01)
-                i = i + 1
-                feedback = navigator.getFeedback()
-                if feedback and i % 5 == 0:
-                    print(
-                        'Estimated time of arrival: '
-                        + '{0:.0f}'.format(
-                            Duration.from_msg(feedback.estimated_time_remaining).nanoseconds
-                            / 1e9
-                        )
-                        + ' seconds.'
-                    )
-
-                    # Some navigation timeout to demo cancellation
-                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds=600.0):
-                        navigator.cancelTask()
-
-                    # Some navigation request change to demo preemption
-                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds=45.0):
-                        goal_pose.pose.position.x = 0.0
-                        goal_pose.pose.position.y = 0.0
-                        navigator.goToPose(goal_pose)
-            
-            result = navigator.getResult()
-            if result == TaskResult.SUCCEEDED:
-                print('Goal succeeded!')
-            elif result == TaskResult.CANCELED:
-                print('Goal was canceled!')
-            elif result == TaskResult.FAILED:
-                (error_code, error_msg) = navigator.getTaskError()
-                print('Goal failed!{error_code}:{error_msg}')
-            else:
-                print('Goal has an invalid return status!')
-        else:
-            try:
-                self.pick_direction()
-                reached = False
-                while not reached:
-                    if self.laser_range.size != 0:
-                        lri = (self.laser_range[FRONT_ANGLE]<float(STOP_DISTANCE))
-                        # self.get_logger().info('Distances: %s' % str(lri))
-
-                        # if the list is not empty
-                        print(lri)
-                        if(lri):
-                            reached = True
-                    rclpy.spin_once(self) 
-            except Exception as e:
-                self.get_logger().error(f'Error: {e}')
-            finally:
-                self.stopbot()'''  
-     
-    def rotate360(self):
-        for i in range(0, 360, 90):
-            twist = Twist()
-            twist.linear.x = 0.0
-            twist.angular.z = 0.5
-            self.publisher_.publish(twist)
-            time.sleep(3) #MUST CHANGE!!!!
-            twist.angular.z = 0.0
-            self.publisher_.publish(twist)
-            time.sleep(1)
-            rclpy.spin_once(self, timeout_sec=0.5)
-            time.sleep(1)
-            self.get_logger().info('Rotating')   
+            print('Goal has an invalid return status!')   
         
 
     def transform_pose(self, input_pose, from_frame, to_frame, pose=True):
@@ -603,21 +415,6 @@ class FrontierNav(Node):
         ogorientation = self.ogPose.orientation
         self.ogroll, self.ogpitch, self.ogyaw = euler_from_quaternion(ogorientation.x, ogorientation.y, ogorientation.z, ogorientation.w)
     
-    '''def thermal(self, msg):
-        self.info_msg('Received thermal point')
-        self.thermalpoint = msg.point
-        point_stamped = PointStamped()
-        point_stamped.header = msg.header
-        #setting the thermal point x and y positions with respect to the map!
-        point_stamped.point.x = self.ogPose.position.x + self.thermalpoint.x*math.sin((math.pi/2)-self.ogyaw-self.bearing)
-        point_stamped.point.x = self.ogPose.position.y + self.thermalpoint.x*math.cos((math.pi/2)-self.ogyaw-self.bearing)
-        transformed = self.transform_pose(point_stamped, from_frame="odom", to_frame="map", pose=False)
-        if transformed is not None:
-            print("Transformed point successfully")
-            self.thermalpoint = transformed
-        else:
-            self.get_logger().error("Failed to transform point")'''
-    
     def thermal_image_callback(self, msg):
         if len(self.laser_range)==0:
             return
@@ -627,15 +424,12 @@ class FrontierNav(Node):
             self.get_logger().warn("Received data does not contain 64 elements.") # for error checking
             return
         
-        
-        
         max_val = np.max(self.image_data)
         if max_val < THRESHOLD or self.ogPose is None:
             self.get_logger().info('No target detected.')
             return
         
         max_index = self.image_data.index(max_val)
-        row = max_index // 8
         col = max_index % 8
 
         avg_val = 0
@@ -646,16 +440,9 @@ class FrontierNav(Node):
         if avg_val > 35.5:
             self.nearHeat = True
             return
-
-        #(py,px) = np.unravel_index(np.argmax(image_data, image_data.shape))
         self.bearing = ((col-3.5)/7)*FIELD_OF_VIEW
 
         global_angle = self.ogyaw + np.deg2rad(self.bearing)
-        '''angle_min       = self.angle_min
-        angle_increment = self.angle_increment
-        idx = int(round((self.bearing - angle_min) / angle_increment))
-        idx = max(0, min(idx, len(self.laser_range) - 1))
-        distance = self.laser_range[idx]'''
 
         self.thermalpoint = PointStamped()
         self.thermalpoint.header.stamp = self.get_clock().now().to_msg()
@@ -686,18 +473,6 @@ class FrontierNav(Node):
             self.thermalpoint = transformed
         else:
             self.get_logger().error("Failed to transform point")
-
-    '''def x_calc(self, col):
-        avg_val = 0
-        for i in range(8):
-            avg_val += self.image_data[col+(8*i)]
-        avg_val = avg_val/8
-        x_calc = math.sqrt(360.3/(avg_val-21.86))
-
-        if avg_val > 35.5:
-            self.nearHeat = True
-
-        return x_calc'''
 
     def scan_callback(self, msg):
         self.angle_min = msg.angle_min
@@ -742,18 +517,9 @@ def main(args=None):
         rclpy.spin_once(auto_nav, timeout_sec=0.5)
     while rclpy.ok():
         try:
-            '''if auto_nav.allFrontier:
-                auto_nav.randomWalk(navigator)
-                auto_nav.rotate360()'''
-            #rclpy.spin(auto_nav)
             auto_nav.move(navigator)
-            #auto_nav.rotate360()
         except Exception as e:
-            if "No frontiers found" in str(e):
-                auto_nav.get_logger().info("No more frontiers available. Shutting down.")
-                break
-            else:
-                auto_nav.get_logger().error(f'Error: {e}')
+            auto_nav.get_logger().error(f'Error: {e}')
     
     time.sleep(4)
     navigator.lifecycleShutdown()
