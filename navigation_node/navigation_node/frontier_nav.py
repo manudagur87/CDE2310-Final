@@ -245,7 +245,6 @@ class FrontierNav(Node):
     def __init__(self):
         super().__init__('frontier_nav')
         self.currentPose = None
-        self.publisher_ = self.create_publisher(Twist,'cmd_vel',10)
         self.launch_ = self.create_publisher(Int8, 'launch_topic', 10)
 
         self.tf_buffer = tf2_ros.Buffer()
