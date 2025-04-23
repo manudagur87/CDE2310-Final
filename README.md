@@ -86,6 +86,17 @@ cd ..
 rm -rf CDE2310-Group9
 ```
 
+### 4. Installing required libraries
+
+```bash
+sudo apt update -y
+sudo apt install -y i2c-tools   
+sudo apt install -y libgpiod-dev python3-libgpiod 
+pip3 install adafruit-blinka 
+pip3 install adafruit-circuitpython-amg88xx 
+pip3 install RPi.GPIO
+```
+
 # Running Instructions
 
 ## On SBC
@@ -122,3 +133,11 @@ Special Thanks to:
     - Mr Soh Eng Keng
 - CDE2310 TAs
 - [SeanReg's Frontier Exploration](https://github.com/SeanReg/nav2_wavefront_frontier_exploration)
+
+# Project Members:
+
+- Manu Dagur
+- Paterson Wong
+- Tsai Ho Hsun
+- Wang Jiawei
+- Shreevrind Kajaria
