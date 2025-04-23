@@ -285,7 +285,7 @@ class FrontierNav(Node):
                     self.thermalpoint = None
                     visited = True
                     break
-        if(self.allFrontier and self.thermalpoint is None):
+        if(self.allFrontier and (self.thermalpoint is None or visited)):
             location = (self.randompoint.point.x, self.randompoint.point.y)
             self.get_logger().info("Sending randompoint")
         
