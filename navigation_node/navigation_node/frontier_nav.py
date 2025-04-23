@@ -354,7 +354,7 @@ class FrontierNav(Node):
         
         result = navigator.getResult()
         if result == TaskResult.SUCCEEDED:
-            if self.thermalgoal==True:
+            if self.thermalgoal==True and self.nearHeat:
                 self.launch_.publish(Int8(1))
                 time.sleep(15)
                 self.nearHeat = False
